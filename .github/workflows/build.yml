@@ -1,28 +1,73 @@
-name: Build FCBAgent.exe
+name: Build FCBAgent (Multi-Windows)
 
 on:
   push:
     branches: [main]
 
 jobs:
-  build:
+
+  build-win7-8:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.8 (32-bit)
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.8.20'
+          architecture: x86
 
       - name: Install dependencies
         run: pip install pyinstaller requests websocket-client pillow pystray pyserial
 
-      - name: Build EXE
-        run: pyinstaller FCBAgent.spec
+      - name: Build EXE Win7-8
+        run: pyinstaller FCBAgent-win7.spec
 
-      - name: Upload artifact
+      - name: Upload artifact Win7-8
         uses: actions/upload-artifact@v4
         with:
-          name: FCBAgent
-          path: dist/FCBAgent.exe
+          name: FCBAgent-Win7-8
+          path: dist/FCBAgent-Win7-8.exe
+
+      - name: Deploy VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 187.77.231.176
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "dist/FCBAgent-Win7-8.exe"
+          target: /var/www/fcb/downloads/
+          strip_components: 1
+
+  build-win10-11:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.11 (64-bit)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+
+      - name: Install dependencies
+        run: pip install pyinstaller requests websocket-client pillow pystray pyserial
+
+      - name: Build EXE Win10-11
+        run: pyinstaller FCBAgent-win10.spec
+
+      - name: Upload artifact Win10-11
+        uses: actions/upload-artifact@v4
+        with:
+          name: FCBAgent-Win10-11
+          path: dist/FCBAgent-Win10-11.exe
+
+      - name: Deploy VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: 187.77.231.176
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "dist/FCBAgent-Win10-11.exe"
+          target: /var/www/fcb/downloads/
+          strip_components: 1
