@@ -4,15 +4,12 @@
 #  Federação Columbófila Brasileira
 #  Gera: FCBAgent.exe (executável único, sem console)
 # ══════════════════════════════════════════════════════════════
-
 block_cipher = None
-
 a = Analysis(
     ['fcbagent.py'],
     pathex=[],
     binaries=[],
     datas=[
-        # Incluir certificados SSL (necessário para HTTPS no .exe)
         ('fcbagent.ico', '.'),
     ],
     hiddenimports=[
@@ -37,6 +34,13 @@ a = Analysis(
         'certifi',
         'charset_normalizer',
         'idna',
+        # Email (necessario para urllib3/requests)
+        'email',
+        'email.mime',
+        'email.mime.text',
+        'email.mime.multipart',
+        'email.mime.base',
+        'email.encoders',
         # Pillow
         'PIL',
         'PIL.Image',
@@ -60,7 +64,6 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Excluir módulos desnecessários para reduzir tamanho
         'matplotlib',
         'numpy',
         'pandas',
@@ -71,7 +74,6 @@ a = Analysis(
         'pytest',
         'setuptools',
         'docutils',
-        'email',
         'html',
         'http.server',
         'xmlrpc',
@@ -88,9 +90,7 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
-
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
-
 exe = EXE(
     pyz,
     a.scripts,
@@ -102,13 +102,13 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,           # Compressão UPX (reduz tamanho ~30%)
+    upx=True,
     upx_exclude=[
         'vcruntime140.dll',
         'python3*.dll',
     ],
     runtime_tmpdir=None,
-    console=False,      # SEM janela de console preta
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch='x86_64',
@@ -116,7 +116,6 @@ exe = EXE(
     entitlements_file=None,
     icon='fcbagent.ico',
     version_info=None,
-    # Manifesto UAC — executar sem privilégios de admin
     uac_admin=False,
     uac_uiaccess=False,
 )
