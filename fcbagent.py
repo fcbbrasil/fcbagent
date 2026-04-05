@@ -54,6 +54,126 @@ DEFAULT_CONFIG = {
     "minimized":    True,
 }
 
+
+# ─────────────────────────────────────────────────────────
+# MÓDULO GPC IMPORTER — importação histórica do sistema GPC
+# ─────────────────────────────────────────────────────────
+import re as _re
+
+def _gpc_gms(g, m, s):
+    try:
+        return round(float(g) + float(m)/60 + float(s)/3600, 6)
+    except Exception:
+        return None
+
+def gpc_parse_concorrentes(path_xls):
+    import pandas as pd
+    df = pd.read_excel(path_xls, engine="xlrd", header=None)
+    cols = df.iloc[0].tolist()
+    df.columns = cols
+    df = df.iloc[1:].reset_index(drop=True)
+    atletas = []
+    for _, r in df.iterrows():
+        num  = str(r.get("numero", "")).strip()
+        nome = str(r.get("nome",   "")).strip()
+        if not num or not nome or nome == "nan":
+            continue
+        lat = _gpc_gms(r.get("grau1"), r.get("min1"), r.get("seg1"))
+        lng = _gpc_gms(r.get("grau2"), r.get("min2"), r.get("seg2"))
+        atletas.append({"gpc_num": num, "nome": nome,
+                        "lat": -lat if lat else None,
+                        "lng": -lng if lng else None, "origem": "gpc"})
+    return atletas
+
+def gpc_parse_pombos(path_xlsx):
+    import pandas as pd
+    xf = pd.ExcelFile(path_xlsx)
+    LINHA = _re.compile(r"^(\d{7})/(\d{2})\s+([MF])\s+102/\s*(\d{3,4})\s+(.+)$")
+    pombos, vistos = [], set()
+    for sheet in xf.sheet_names:
+        df = pd.read_excel(path_xlsx, sheet_name=sheet, header=None)
+        texto = ""
+        for _, row in df.iterrows():
+            for cell in row:
+                if pd.notna(cell):
+                    txt = str(cell)
+                    txt = _re.sub(r"(?<!\n)(\d{7}/\d{2}\s+[MF]\s+102/)", r"\n\1", txt)
+                    texto += txt + "\n"
+        for linha in texto.split("\n"):
+            linha = linha.strip()
+            m = LINHA.match(linha)
+            if not m:
+                continue
+            anilha, ano_s, sexo, num_c, nome_raw = m.groups()
+            ano  = "20" + ano_s
+            nome = _re.split(r"CLUBE|Pag\.?|Total|POMOR|www\.", nome_raw, flags=_re.IGNORECASE)[0]
+            nome = _re.sub(r"\s+", " ", nome).strip()[:60]
+            if len(nome) < 2:
+                continue
+            chave = (anilha, ano)
+            if chave not in vistos:
+                vistos.add(chave)
+                pombos.append({"anilha": anilha, "ano_nascimento": int(ano),
+                               "sexo": sexo, "num_concorrente": num_c, "origem": "gpc"})
+    return pombos
+
+def gpc_parse_classificacao(path_xlsx):
+    import pandas as pd
+    xf = pd.ExcelFile(path_xlsx)
+    ANILHA_RE   = _re.compile(r"^\d{7}/\d{2}$")
+    CONC_RE     = _re.compile(r"^102/(\d{3,4})$")
+    CONCURSO_RE = _re.compile(r"(\d{4})/\s*(\d+)\s+([\w\s\-\.]+?)\s+(\d{2}/\d{2}/\d{4})")
+    concursos, resultados, atual = {}, [], None
+    for sheet in xf.sheet_names:
+        df = pd.read_excel(path_xlsx, sheet_name=sheet, header=None)
+        for _, row in df.iterrows():
+            cells = [str(c).strip() if pd.notna(c) else "" for c in row]
+            full  = " ".join(cells)
+            m = CONCURSO_RE.search(full)
+            if m:
+                cid = m.group(1) + "/" + m.group(2).strip()
+                atual = {"gpc_id": cid, "ano": m.group(1), "num": m.group(2).strip(),
+                         "nome": m.group(3).strip(), "data": m.group(4), "origem": "gpc"}
+                if cid not in concursos:
+                    concursos[cid] = atual
+                continue
+            for i, c in enumerate(cells):
+                if not ANILHA_RE.match(c):
+                    continue
+                for j in range(i+1, min(i+5, len(cells))):
+                    mc = CONC_RE.match(cells[j])
+                    if not mc:
+                        continue
+                    lugar = None
+                    for k in range(j+1, min(j+5, len(cells))):
+                        if cells[k].isdigit():
+                            lugar = int(cells[k])
+                            break
+                    if atual and lugar:
+                        resultados.append({
+                            "concurso_gpc_id": atual["gpc_id"],
+                            "concurso_nome": atual["nome"],
+                            "concurso_data": atual["data"],
+                            "anilha": c.split("/")[0],
+                            "ano_pombo": "20" + c.split("/")[1],
+                            "num_concorrente": mc.group(1),
+                            "posicao": lugar, "origem": "gpc"})
+                    break
+    return list(concursos.values()), resultados
+
+def gpc_gerar_json(path_conc, path_pombos, path_provas):
+    atletas = gpc_parse_concorrentes(path_conc)
+    pombos  = gpc_parse_pombos(path_pombos)
+    provas, resultados = gpc_parse_classificacao(path_provas)
+    return {"versao": "1.0", "origem": "gpc",
+            "atletas": atletas, "portadores": pombos,
+            "provas": provas, "resultados": resultados,
+            "stats": {"total_atletas": len(atletas),
+                      "total_portadores": len(pombos),
+                      "total_provas": len(provas),
+                      "total_resultados": len(resultados)}}
+
+
 def load_config():
     if CONFIG_FILE.exists():
         try:
@@ -334,6 +454,114 @@ class ConfigDialog(tk.Toplevel):
         self.destroy()
 
 
+
+class AbaImportarGPC(tk.Toplevel):
+    def __init__(self, parent, api_url, token):
+        super().__init__(parent)
+        self.api_url = api_url
+        self.token   = token
+        self.title("Importar Historico GPC")
+        self.geometry("520x430")
+        self.configure(bg="#060e07")
+        self.resizable(False, False)
+        self.grab_set()
+        self.v_conc  = tk.StringVar()
+        self.v_pombo = tk.StringVar()
+        self.v_prova = tk.StringVar()
+        self._build()
+
+    def _build(self):
+        BG="#060e07"; BG2="#0c1a0e"; CRM="#f2f0ea"; VRD="#2d7a3e"
+        hdr = tk.Frame(self, bg=BG2, height=46)
+        hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr, text="IMPORTAR HISTORICO GPC", bg=BG2, fg=CRM,
+                 font=("Consolas",10,"bold")).pack(side="left", padx=14, pady=12)
+        body = tk.Frame(self, bg=BG, padx=18, pady=14)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text="Selecione os 3 arquivos exportados do GPC:",
+                 bg=BG, fg="#999", font=("Consolas",8)).pack(anchor="w", pady=(0,10))
+        def fila(lbl, var, ft):
+            frm = tk.Frame(body, bg=BG); frm.pack(fill="x", pady=3)
+            tk.Label(frm, text=lbl, bg=BG, fg=CRM,
+                     font=("Consolas",8), width=24, anchor="w").pack(side="left")
+            tk.Entry(frm, textvariable=var, bg=BG2, fg=CRM,
+                     insertbackground=CRM, relief="flat",
+                     font=("Consolas",8), width=26).pack(side="left", padx=(0,4))
+            tk.Button(frm, text="...", bg=BG2, fg=CRM, relief="flat",
+                      font=("Consolas",8), padx=5,
+                      command=lambda v=var, f=ft: self._escolher(v, f)).pack(side="left")
+        fila("Concorrentes (.xls):",   self.v_conc,
+             [("Excel 97-2003","*.xls"),("Todos","*.*")])
+        fila("Pombos (.xlsx):",        self.v_pombo,
+             [("Excel","*.xlsx"),("Todos","*.*")])
+        fila("Classificacao (.xlsx):", self.v_prova,
+             [("Excel","*.xlsx"),("Todos","*.*")])
+        tk.Label(body, text="Log:", bg=BG, fg="#999",
+                 font=("Consolas",8)).pack(anchor="w", pady=(14,2))
+        self.log = tk.Text(body, height=7, bg=BG2, fg=CRM,
+                           font=("Consolas",8), relief="flat", state="disabled")
+        self.log.pack(fill="x")
+        bf = tk.Frame(body, bg=BG); bf.pack(fill="x", pady=(14,0))
+        self.btn = tk.Button(bf, text="PROCESSAR E ENVIAR",
+                             bg=VRD, fg="white", relief="flat",
+                             font=("Consolas",9,"bold"), padx=14, pady=7,
+                             command=self._iniciar)
+        self.btn.pack(side="left")
+        tk.Button(bf, text="Fechar", bg=BG2, fg=CRM, relief="flat",
+                  font=("Consolas",8), padx=10, pady=7,
+                  command=self.destroy).pack(side="right")
+
+    def _escolher(self, var, ft):
+        from tkinter import filedialog
+        p = filedialog.askopenfilename(filetypes=ft)
+        if p: var.set(p)
+
+    def _log(self, msg):
+        self.log.configure(state="normal")
+        self.log.insert("end", msg + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _iniciar(self):
+        if not all([self.v_conc.get(), self.v_pombo.get(), self.v_prova.get()]):
+            self._log("Selecione os 3 arquivos."); return
+        if not self.token:
+            self._log("Token nao configurado."); return
+        self.btn.configure(state="disabled", text="Processando...")
+        threading.Thread(target=self._importar, daemon=True).start()
+
+    def _importar(self):
+        import requests as req
+        try:
+            self._log("Lendo arquivos GPC...")
+            dados = gpc_gerar_json(self.v_conc.get(), self.v_pombo.get(), self.v_prova.get())
+            s = dados["stats"]
+            self._log("  " + str(s["total_atletas"]) + " concorrentes")
+            self._log("  " + str(s["total_portadores"]) + " pombos")
+            self._log("  " + str(s["total_provas"]) + " provas / " + str(s["total_resultados"]) + " resultados")
+            self._log("Enviando ao servidor...")
+            r = req.post(
+                self.api_url + "/api/importacao/gpc",
+                json=dados,
+                headers={"Authorization": "Bearer " + self.token,
+                         "Content-Type": "application/json"},
+                timeout=120
+            )
+            if r.status_code == 200:
+                d = r.json()
+                self._log("Importacao concluida!")
+                self._log("  Atletas:       " + str(d.get("atletas_inseridos","?")))
+                self._log("  Pombos:        " + str(d.get("pombos_inseridos","?")))
+                self._log("  Provas:        " + str(d.get("provas_inseridas","?")))
+                self._log("  Encestamentos: " + str(d.get("encestamentos_inseridos","?")))
+            else:
+                self._log("Erro " + str(r.status_code) + ": " + r.text[:150])
+        except Exception as e:
+            self._log("Erro: " + str(e))
+        finally:
+            self.btn.configure(state="normal", text="PROCESSAR E ENVIAR")
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -366,6 +594,9 @@ class App(tk.Tk):
                  font=("Consolas",8)).pack(side="left")
         tk.Button(hdr, text="⚙ Config", bg="#0c1a0e", fg="#f2f0ea",
                   relief="flat", command=self.abrir_config).pack(side="right", padx=8)
+        tk.Button(hdr, text="GPC", bg="#0c1a0e", fg="#ff6b00",
+                  relief="flat", font=("Consolas",8), padx=6,
+                  command=self.abrir_importar_gpc).pack(side="right", padx=4)
         tk.Button(hdr, text="↓ Bandeja", bg="#0c1a0e", fg="#f2f0ea",
                   relief="flat", command=self.iconify).pack(side="right")
 
@@ -454,6 +685,15 @@ class App(tk.Tk):
 
     def abrir_config(self):
         ConfigDialog(self)
+
+    def abrir_importar_gpc(self):
+        cfg = load_config()
+        AbaImportarGPC(
+            self,
+            cfg.get("api_url", "https://api.fcbpigeonslive.com.br"),
+            cfg.get("api_token", "")
+        )
+
 
     def on_close(self):
         self.parar()
