@@ -366,7 +366,7 @@ class FCBEngine(threading.Thread):
 
         self.emit("status", "Monitorando · Aguardando arquivos PAMPA", "ok")
         self.emit("log", f"✓ Monitorando pasta: {pasta}", "ok")
-        self.emit("log", "Aguardando exportação do PAMPA CLUB...", "info")
+        self.emit("log", "Aguardando arquivos PAMPA (com ou sem extensão .txt)...", "info")
         self.emit("conectado", None)
 
         processados = load_processed()
@@ -374,7 +374,17 @@ class FCBEngine(threading.Thread):
 
         while self.running:
             try:
-                txts = sorted(pasta.glob("*.txt"), key=lambda f: f.stat().st_mtime, reverse=True)
+                # Captura arquivos PAMPA com qualquer extensão (ou sem extensão).
+                # PAMPA Software v4.4 às vezes exporta como "PAMPA" sem .txt.
+                # Filtro case-insensitive por prefixo "PAMPA" para evitar lixo.
+                candidatos = list(pasta.iterdir())
+                pampa_files = [
+                    f for f in candidatos
+                    if f.is_file()
+                    and f.name.upper().startswith("PAMPA")
+                    and f.suffix.lower() in ("", ".txt")
+                ]
+                txts = sorted(pampa_files, key=lambda f: f.stat().st_mtime, reverse=True)
                 for txt in txts[:10]:
                     processados = self.processar_arquivo(str(txt), processados)
                 if time.time() - ultimo_sync > 60:
