@@ -209,6 +209,15 @@ def save_processed(s):
 
 # ── Parser PAMPA .txt ──────────────────────────────────────────
 def parse_pampa_txt(filepath):
+    """
+    Parser do output do PAMPA Software v4.4 (formato CONSTATACAO).
+
+    Formato esperado (cada linha de chegada):
+       001 |   7928910  25 F FCB | B012086B | 01/05/26 07:53:18 | OK | A020097 |
+      [Nro]|  [Anilha] [Ano][Sx][Cl] | [Chip] | [Data DD/MM/AA] [HH:MM:SS] | [SC] | ...
+
+    Aceita SC=OK (chegou) e ignora SC=-- (não chegou ainda).
+    """
     chegadas = []
     try:
         texto = None
@@ -219,37 +228,68 @@ def parse_pampa_txt(filepath):
             except:
                 continue
         if not texto:
+            log.warning(f"parse_pampa_txt: não consegui ler {filepath}")
             return []
 
-        linhas = texto.splitlines()
-        data_prova = None
+        # Regex casa o formato real do PAMPA Software v4.4
+        # Captura: anilha, ano, sexo, clube, chip, data, hora, sc
+        REGEX_LINHA = re.compile(
+            r'^\s*\d+\s*\|\s*'                       # Nro: " 001 |"
+            r'(\d{6,7})\s+(\d{2})\s+([MF])\s+(\w+)'  # 7928910  25 F FCB
+            r'\s*\|\s*([A-F0-9]+)\s*\|\s*'           # | B012086B |
+            r'(\d{2}/\d{2}/\d{2,4})\s+'              # 01/05/26
+            r'(\d{2}:\d{2}:\d{2})\s*\|\s*'           # 07:53:18 |
+            r'(OK|--)'                               # OK ou --
+        )
 
-        for linha in linhas:
-            linha = linha.strip()
-            if not linha:
+        total_linhas_match = 0
+        total_chegadas_ok  = 0
+        total_nao_chegou   = 0
+
+        for linha in texto.splitlines():
+            m = REGEX_LINHA.match(linha)
+            if not m:
+                continue
+            total_linhas_match += 1
+
+            anilha_num, ano, sexo, clube, chip, data_str, hora, sc = m.groups()
+
+            # Pular pombo que ainda não chegou (SC=--)
+            if sc != 'OK':
+                total_nao_chegou += 1
                 continue
 
-            m_data = re.search(r'(\d{2})[/\-](\d{2})[/\-](\d{4})', linha)
-            if m_data and not data_prova:
-                data_prova = f"{m_data.group(3)}-{m_data.group(2)}-{m_data.group(1)}"
+            # Normaliza anilha: 7 dígitos zero-padded
+            anilha = anilha_num.zfill(7)
 
-            m = re.search(
-                r'([A-Z]{2}\d{2}[-\s]?\d{6,7}|\d{7})\s+(\d{2}:\d{2}:\d{2})',
-                linha
-            )
-            if m:
-                anilha_raw = m.group(1).replace('-','').replace(' ','')
-                hora       = m.group(2)
-                nums       = re.sub(r'[^0-9]', '', anilha_raw)
-                anilha     = nums[-7:].zfill(7) if len(nums) >= 7 else nums.zfill(7)
-                data_ts    = data_prova or datetime.now().strftime('%Y-%m-%d')
-                chegadas.append({
-                    "anilha":          anilha,
-                    "timestamp_local": f"{data_ts}T{hora}",
-                    "timestamp_utc":   datetime.utcnow().isoformat() + "Z",
-                    "fonte":           "pampa_txt",
-                    "arquivo_origem":  Path(filepath).name,
-                })
+            # Normaliza data: DD/MM/AA → YYYY-MM-DD (assume 20XX para AA<70)
+            try:
+                d, mes, a = data_str.split('/')
+                if len(a) == 2:
+                    a = ('20' + a) if int(a) < 70 else ('19' + a)
+                data_iso = f"{a}-{mes.zfill(2)}-{d.zfill(2)}"
+            except:
+                data_iso = datetime.now().strftime('%Y-%m-%d')
+
+            chegadas.append({
+                "anilha":          anilha,
+                "timestamp_local": f"{data_iso}T{hora}",
+                "timestamp_utc":   datetime.utcnow().isoformat() + "Z",
+                "fonte":           "pampa_txt",
+                "arquivo_origem":  Path(filepath).name,
+                "chip":            chip,
+                "ano_anel":        ano,
+                "sexo":            sexo,
+                "clube":           clube,
+            })
+            total_chegadas_ok += 1
+
+        log.info(
+            f"parse_pampa_txt: {Path(filepath).name} → "
+            f"{total_linhas_match} linhas, "
+            f"{total_chegadas_ok} chegadas OK, "
+            f"{total_nao_chegou} ainda não chegaram"
+        )
     except Exception as e:
         log.error(f"parse_pampa_txt: {e}")
     return chegadas
@@ -289,7 +329,7 @@ class FCBEngine(threading.Thread):
             "X-Agent-ID":    f"AGENT-{cfg['criador_id']}",
         }
         payload = {**dados, "criador_id": cfg["criador_id"],
-                   "clube_id": cfg["clube_id"], "agent_version": "2.0"}
+                   "clube_id": cfg["clube_id"], "agent_version": "2.2"}
         try:
             r = requests.post(cfg["api_url"], json=payload, headers=headers, timeout=8)
             if r.status_code == 200:
