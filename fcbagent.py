@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ═══════════════════════════════════════════════════════════════
-# FCB Agent v2.2 — Federação Columbófila Brasileira
+# FCB Agent v2.3 — Federação Columbófila Brasileira
 # Monitora pasta PAMPA e envia chegadas ao painel ao vivo
 # fcbpigeonslive.com.br
 # ═══════════════════════════════════════════════════════════════
@@ -329,7 +329,7 @@ class FCBEngine(threading.Thread):
             "X-Agent-ID":    f"AGENT-{cfg['criador_id']}",
         }
         payload = {**dados, "criador_id": cfg["criador_id"],
-                   "clube_id": cfg["clube_id"], "agent_version": "2.2"}
+                   "clube_id": cfg["clube_id"], "agent_version": "2.3"}
         try:
             r = requests.post(cfg["api_url"], json=payload, headers=headers, timeout=8)
             if r.status_code == 200:
@@ -640,7 +640,7 @@ class App(tk.Tk):
         hdr.pack_propagate(False)
         tk.Label(hdr, text="FCBAgent", bg="#0c1a0e", fg="#f2f0ea",
                  font=("Consolas",14,"bold")).pack(side="left", padx=16)
-        tk.Label(hdr, text="v2.2", bg="#0c1a0e", fg="#3a9950",
+        tk.Label(hdr, text="v2.3", bg="#0c1a0e", fg="#3a9950",
                  font=("Consolas",8)).pack(side="left")
         tk.Button(hdr, text="⚙ Config", bg="#0c1a0e", fg="#f2f0ea",
                   relief="flat", command=self.abrir_config).pack(side="right", padx=8)
