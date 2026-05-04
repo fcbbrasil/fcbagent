@@ -48,7 +48,7 @@ DEFAULT_CONFIG = {
     "criador_nome": "",
     "clube_id":     "",
     "api_token":    "",
-    "api_url":      "https://api.fcbpigeonslive.com.br/api/chegadas",
+    "api_url":      "https://api.fcbpigeonslive.com.br/api/agent/chegadas",
     "pampa_pasta":  "C:\\PAMPA",
     "autostart":    True,
     "minimized":    True,
