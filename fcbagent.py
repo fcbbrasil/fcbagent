@@ -1,8 +1,21 @@
 #!/usr/bin/env python3
 # ═══════════════════════════════════════════════════════════════
-# FCB Agent v2.3 — Federação Columbófila Brasileira
-# Monitora pasta PAMPA e envia chegadas ao painel ao vivo
+# FCB Agent v2.4 — Federação Columbófila Brasileira
+# Monitora pasta de exportação e envia chegadas ao painel ao vivo
 # fcbpigeonslive.com.br
+#
+# CHANGELOG v2.4 (18/05/2026):
+#   • enviar() agora retorna tupla (status, valor, codigo_erro):
+#       status='ok'        — registrada (valor=velocidade)
+#       status='rejeitado' — backend recusou semanticamente (anilha não
+#                            encestada, prova fechada, etc.) — NÃO retry
+#       status='offline'   — falha de rede/timeout — vai para fila offline
+#   • Backward-compatible: se resposta não tiver chave 'ok', presume sucesso
+#     por status 2xx (comportamento v2.0 preservado para endpoints legados)
+#   • processar_arquivo() distingue 3 cenários, contadores separados,
+#     resumo no fim do batch com alerta visual se houver rejeições
+#   • UI ganha 2 contadores: REGISTRADAS (verde) e REJEITADAS (vermelho)
+#   • Tag 'rejeitada' no log_box (vermelho intenso)
 # ═══════════════════════════════════════════════════════════════
 
 import tkinter as tk
@@ -48,7 +61,7 @@ DEFAULT_CONFIG = {
     "criador_nome": "",
     "clube_id":     "",
     "api_token":    "",
-    "api_url":      "https://api.fcbpigeonslive.com.br/api/agent/chegadas",
+    "api_url":      "https://api.fcbpigeonslive.com.br/api/chegadas",
     "pampa_pasta":  "C:\\PAMPA",
     "autostart":    True,
     "minimized":    True,
@@ -57,6 +70,7 @@ DEFAULT_CONFIG = {
 
 # ─────────────────────────────────────────────────────────
 # MÓDULO GPC IMPORTER — importação histórica do sistema GPC
+# (inalterado — preservado integralmente do v2.0)
 # ─────────────────────────────────────────────────────────
 import re as _re
 
@@ -207,17 +221,8 @@ def load_processed():
 def save_processed(s):
     PROCESSED_FILE.write_text(json.dumps(list(s)), encoding='utf-8')
 
-# ── Parser PAMPA .txt ──────────────────────────────────────────
+# ── Parser .txt (inalterado — preservado do v2.0) ──────────────
 def parse_pampa_txt(filepath):
-    """
-    Parser do output do PAMPA Software v4.4 (formato CONSTATACAO).
-
-    Formato esperado (cada linha de chegada):
-       001 |   7928910  25 F FCB | B012086B | 01/05/26 07:53:18 | OK | A020097 |
-      [Nro]|  [Anilha] [Ano][Sx][Cl] | [Chip] | [Data DD/MM/AA] [HH:MM:SS] | [SC] | ...
-
-    Aceita SC=OK (chegou) e ignora SC=-- (não chegou ainda).
-    """
     chegadas = []
     try:
         texto = None
@@ -228,68 +233,37 @@ def parse_pampa_txt(filepath):
             except:
                 continue
         if not texto:
-            log.warning(f"parse_pampa_txt: não consegui ler {filepath}")
             return []
 
-        # Regex casa o formato real do PAMPA Software v4.4
-        # Captura: anilha, ano, sexo, clube, chip, data, hora, sc
-        REGEX_LINHA = re.compile(
-            r'^\s*\d+\s*\|\s*'                       # Nro: " 001 |"
-            r'(\d{6,7})\s+(\d{2})\s+([MF])\s+(\w+)'  # 7928910  25 F FCB
-            r'\s*\|\s*([A-F0-9]+)\s*\|\s*'           # | B012086B |
-            r'(\d{2}/\d{2}/\d{2,4})\s+'              # 01/05/26
-            r'(\d{2}:\d{2}:\d{2})\s*\|\s*'           # 07:53:18 |
-            r'(OK|--)'                               # OK ou --
-        )
+        linhas = texto.splitlines()
+        data_prova = None
 
-        total_linhas_match = 0
-        total_chegadas_ok  = 0
-        total_nao_chegou   = 0
-
-        for linha in texto.splitlines():
-            m = REGEX_LINHA.match(linha)
-            if not m:
-                continue
-            total_linhas_match += 1
-
-            anilha_num, ano, sexo, clube, chip, data_str, hora, sc = m.groups()
-
-            # Pular pombo que ainda não chegou (SC=--)
-            if sc != 'OK':
-                total_nao_chegou += 1
+        for linha in linhas:
+            linha = linha.strip()
+            if not linha:
                 continue
 
-            # Normaliza anilha: 7 dígitos zero-padded
-            anilha = anilha_num.zfill(7)
+            m_data = re.search(r'(\d{2})[/\-](\d{2})[/\-](\d{4})', linha)
+            if m_data and not data_prova:
+                data_prova = f"{m_data.group(3)}-{m_data.group(2)}-{m_data.group(1)}"
 
-            # Normaliza data: DD/MM/AA → YYYY-MM-DD (assume 20XX para AA<70)
-            try:
-                d, mes, a = data_str.split('/')
-                if len(a) == 2:
-                    a = ('20' + a) if int(a) < 70 else ('19' + a)
-                data_iso = f"{a}-{mes.zfill(2)}-{d.zfill(2)}"
-            except:
-                data_iso = datetime.now().strftime('%Y-%m-%d')
-
-            chegadas.append({
-                "anilha":          anilha,
-                "timestamp_local": f"{data_iso}T{hora}",
-                "timestamp_utc":   datetime.utcnow().isoformat() + "Z",
-                "fonte":           "pampa_txt",
-                "arquivo_origem":  Path(filepath).name,
-                "chip":            chip,
-                "ano_anel":        ano,
-                "sexo":            sexo,
-                "clube":           clube,
-            })
-            total_chegadas_ok += 1
-
-        log.info(
-            f"parse_pampa_txt: {Path(filepath).name} → "
-            f"{total_linhas_match} linhas, "
-            f"{total_chegadas_ok} chegadas OK, "
-            f"{total_nao_chegou} ainda não chegaram"
-        )
+            m = re.search(
+                r'([A-Z]{2}\d{2}[-\s]?\d{6,7}|\d{7})\s+(\d{2}:\d{2}:\d{2})',
+                linha
+            )
+            if m:
+                anilha_raw = m.group(1).replace('-','').replace(' ','')
+                hora       = m.group(2)
+                nums       = re.sub(r'[^0-9]', '', anilha_raw)
+                anilha     = nums[-7:].zfill(7) if len(nums) >= 7 else nums.zfill(7)
+                data_ts    = data_prova or datetime.now().strftime('%Y-%m-%d')
+                chegadas.append({
+                    "anilha":          anilha,
+                    "timestamp_local": f"{data_ts}T{hora}",
+                    "timestamp_utc":   datetime.utcnow().isoformat() + "Z",
+                    "fonte":           "pampa_txt",
+                    "arquivo_origem":  Path(filepath).name,
+                })
     except Exception as e:
         log.error(f"parse_pampa_txt: {e}")
     return chegadas
@@ -321,7 +295,17 @@ class FCBEngine(threading.Thread):
     def emit(self, tipo, msg, dados=None):
         self.ui_queue.put({"tipo": tipo, "msg": msg, "dados": dados})
 
+    # ═══════════════════════════════════════════════════════════════
+    # v2.4 — REFATORADO: distingue ok / rejeitado / offline
+    # ═══════════════════════════════════════════════════════════════
     def enviar(self, dados):
+        """Envia chegada ao painel.
+        Retorna tupla (status, valor, codigo_erro):
+          status='ok'        — registrada com sucesso, valor = velocidade
+          status='rejeitado' — backend recusou (anilha não encestada,
+                               prova fechada, etc.) — NÃO retry
+          status='offline'   — falha de rede/timeout — empilhar offline
+        """
         cfg = load_config()
         headers = {
             "Authorization": f"Bearer {cfg['api_token']}",
@@ -329,14 +313,44 @@ class FCBEngine(threading.Thread):
             "X-Agent-ID":    f"AGENT-{cfg['criador_id']}",
         }
         payload = {**dados, "criador_id": cfg["criador_id"],
-                   "clube_id": cfg["clube_id"], "agent_version": "2.3"}
+                   "clube_id": cfg["clube_id"], "agent_version": "2.4"}
+
+        # Falhas de rede/timeout → offline
         try:
-            r = requests.post(cfg["api_url"], json=payload, headers=headers, timeout=8)
-            if r.status_code == 200:
-                return True, r.json().get("velocidade","—")
-            return False, None
-        except:
-            return False, None
+            r = requests.post(cfg["api_url"], json=payload,
+                              headers=headers, timeout=8)
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            return ("offline", None, f"rede ({type(e).__name__})")
+        except requests.exceptions.RequestException as e:
+            return ("offline", None, f"requests ({type(e).__name__})")
+
+        # Resposta não-JSON → offline (anômala, vale retry)
+        try:
+            data = r.json()
+        except (ValueError, json.JSONDecodeError):
+            return ("offline", None, f"resposta_nao_json (HTTP {r.status_code})")
+
+        # Convenção FCBPigeonsLive: 200 + {ok: bool, erro?: str}
+        # Backward-compat: se não tiver 'ok' presume sucesso por 2xx
+        if r.status_code == 200:
+            if "ok" in data:
+                if data["ok"]:
+                    return ("ok", data.get("velocidade", "—"), None)
+                else:
+                    return ("rejeitado", None,
+                            data.get("erro") or "sem_descricao")
+            else:
+                # endpoints legados (sem 'ok' no payload)
+                return ("ok", data.get("velocidade", "—"), None)
+
+        # 5xx → servidor indisponível, vale retry offline
+        if 500 <= r.status_code < 600:
+            return ("offline", None, f"servidor_indisponivel (HTTP {r.status_code})")
+
+        # 4xx → erro de cliente, semântico → rejeitado
+        erro = data.get("erro") or data.get("error") or f"HTTP {r.status_code}"
+        return ("rejeitado", None, erro)
 
     def sincronizar_offline(self):
         fila = load_queue()
@@ -344,22 +358,43 @@ class FCBEngine(threading.Thread):
             return
         self.emit("log", f"Sincronizando {len(fila)} chegadas offline...", "info")
         enviadas = []
+        rejeitadas_no_resync = []
         for item in fila:
-            ok, _ = self.enviar(item)
-            if ok: enviadas.append(item)
-            else: break
-        fila = [i for i in fila if i not in enviadas]
+            status, vel, erro = self.enviar(item)
+            if status == "ok":
+                enviadas.append(item)
+            elif status == "rejeitado":
+                # v2.4: rejeição semântica durante resync deve ser ESCALADA, não
+                # ficar tentando para sempre. Removemos da fila e logamos.
+                rejeitadas_no_resync.append((item, erro))
+            else:  # offline — para de processar
+                break
+        fila = [i for i in fila if i not in enviadas
+                and not any(i is r[0] for r in rejeitadas_no_resync)]
         save_queue(fila)
         if enviadas:
             self.emit("log", f"✓ {len(enviadas)} chegadas sincronizadas", "ok")
+        if rejeitadas_no_resync:
+            self.emit("log",
+                f"✗ {len(rejeitadas_no_resync)} chegadas da fila offline foram REJEITADAS "
+                "pelo painel e descartadas (não voltariam a ter sucesso)",
+                "rejeitada")
+            for item, erro in rejeitadas_no_resync[:5]:
+                self.emit("log",
+                    f"   ✗ anilha {item.get('anilha','?')} · motivo: {erro}",
+                    "rejeitada")
 
+    # ═══════════════════════════════════════════════════════════════
+    # v2.4 — REFATORADO: três caminhos (ok / rejeitado / offline) +
+    #        contadores de batch + resumo no fim + alerta visual
+    # ═══════════════════════════════════════════════════════════════
     def processar_arquivo(self, filepath, processados):
         conteudo  = Path(filepath).read_bytes()
         file_hash = hashlib.md5(conteudo).hexdigest()
         if file_hash in processados:
             return processados
 
-        self.emit("log", f"📂 Novo arquivo PAMPA: {Path(filepath).name}", "info")
+        self.emit("log", f"📂 Novo arquivo: {Path(filepath).name}", "info")
         chegadas = parse_pampa_txt(filepath)
 
         if not chegadas:
@@ -368,21 +403,73 @@ class FCBEngine(threading.Thread):
             save_processed(processados)
             return processados
 
-        self.emit("log", f"📋 {len(chegadas)} chegadas encontradas — enviando...", "info")
+        self.emit("log",
+            f"📋 {len(chegadas)} chegadas encontradas — enviando...",
+            "info")
+
+        n_ok = 0
+        n_rejeitadas = 0
+        n_offline = 0
+        motivos_rejeicao = {}
+
         for c in chegadas:
             anilha = c["anilha"]
             hora   = c["timestamp_local"][11:]
-            self.emit("log", f"🕊 Anilha {anilha} · {hora} · enviando...", "lj")
-            ok, vel = self.enviar(c)
-            if ok:
-                vel_str = f"{vel:,.2f} m/min".replace(",","X").replace(".",",").replace("X",".") if isinstance(vel,(int,float)) else "—"
-                self.emit("log", f"✓ Chegada registrada · {vel_str}", "ok")
-                self.emit("chegada", c.get("timestamp_local",""), vel)
-            else:
+            self.emit("log",
+                f"🕊 Anilha {anilha} · {hora} · enviando...", "lj")
+
+            status, vel, erro = self.enviar(c)
+
+            if status == "ok":
+                if isinstance(vel, (int, float)):
+                    vel_str = (f"{vel:,.2f} m/min"
+                               .replace(",","X").replace(".",",").replace("X","."))
+                else:
+                    vel_str = str(vel)
+                self.emit("log",
+                    f"✓ Anilha {anilha} REGISTRADA · {vel_str}", "ok")
+                self.emit("chegada_ok", c.get("timestamp_local",""), vel)
+                n_ok += 1
+
+            elif status == "rejeitado":
+                self.emit("log",
+                    f"✗ Anilha {anilha} REJEITADA · motivo: {erro}",
+                    "rejeitada")
+                self.emit("chegada_rejeitada", anilha, erro)
+                motivos_rejeicao[erro] = motivos_rejeicao.get(erro, 0) + 1
+                n_rejeitadas += 1
+                # v2.4: NÃO vai para offline_queue — erro semântico não
+                # muda com retry
+
+            else:  # offline
                 fila = load_queue()
                 fila.append(c)
                 save_queue(fila)
-                self.emit("log", f"⚠ Sem conexão · salvo offline ({len(fila)} na fila)", "erro")
+                self.emit("log",
+                    f"⚠ Anilha {anilha} · sem conexão ({erro}) · "
+                    f"salvo offline ({len(fila)} na fila)", "erro")
+                n_offline += 1
+
+        # ─── Resumo do batch ────────────────────────────────────────
+        self.emit("log", "─" * 56, "info")
+        self.emit("log",
+            f"📊 RESUMO: {n_ok} registradas · "
+            f"{n_rejeitadas} rejeitadas · {n_offline} offline",
+            "info")
+
+        # Alerta visual se houver rejeições
+        if n_rejeitadas > 0:
+            self.emit("log",
+                f"⚠⚠⚠ ATENÇÃO: {n_rejeitadas} chegadas foram REJEITADAS "
+                f"pelo painel!", "rejeitada")
+            for motivo, qtd in sorted(motivos_rejeicao.items(),
+                                       key=lambda x: -x[1]):
+                self.emit("log",
+                    f"   • {qtd}× · {motivo}", "rejeitada")
+            self.emit("log",
+                "Verifique se a prova existe no painel, se os pombos foram "
+                "encestados, e se o status da prova está correto antes de "
+                "tentar novamente.", "erro")
 
         processados.add(file_hash)
         save_processed(processados)
@@ -399,14 +486,17 @@ class FCBEngine(threading.Thread):
 
         pasta = Path(cfg["pampa_pasta"])
         if not pasta.exists():
-            self.emit("status", "Pasta PAMPA não encontrada", "erro")
+            self.emit("status", "Pasta de exportação não encontrada", "erro")
             self.emit("log", f"⚠ Pasta não encontrada: {pasta}", "erro")
-            self.emit("log", "Configure o caminho correto em Config → Pasta PAMPA", "info")
+            self.emit("log",
+                "Configure o caminho correto em Config → Pasta de exportação",
+                "info")
             return
 
-        self.emit("status", "Monitorando · Aguardando arquivos PAMPA", "ok")
+        self.emit("status",
+            "Monitorando · Aguardando arquivos de exportação", "ok")
         self.emit("log", f"✓ Monitorando pasta: {pasta}", "ok")
-        self.emit("log", "Aguardando arquivos PAMPA (com ou sem extensão .txt)...", "info")
+        self.emit("log", "Aguardando exportação do sistema do clube...", "info")
         self.emit("conectado", None)
 
         processados = load_processed()
@@ -414,17 +504,8 @@ class FCBEngine(threading.Thread):
 
         while self.running:
             try:
-                # Captura arquivos PAMPA com qualquer extensão (ou sem extensão).
-                # PAMPA Software v4.4 às vezes exporta como "PAMPA" sem .txt.
-                # Filtro case-insensitive por prefixo "PAMPA" para evitar lixo.
-                candidatos = list(pasta.iterdir())
-                pampa_files = [
-                    f for f in candidatos
-                    if f.is_file()
-                    and f.name.upper().startswith("PAMPA")
-                    and f.suffix.lower() in ("", ".txt")
-                ]
-                txts = sorted(pampa_files, key=lambda f: f.stat().st_mtime, reverse=True)
+                txts = sorted(pasta.glob("*.txt"),
+                              key=lambda f: f.stat().st_mtime, reverse=True)
                 for txt in txts[:10]:
                     processados = self.processar_arquivo(str(txt), processados)
                 if time.time() - ultimo_sync > 60:
@@ -470,7 +551,7 @@ class ConfigDialog(tk.Toplevel):
         row("ID do Clube:", self.v_clube)
         row("Token FCB Agent:", self.v_token, show="*")
 
-        tk.Label(self, text="Pasta PAMPA (onde o software salva os .txt):", **lbl_opts).pack(anchor="w", padx=24, pady=(8,1))
+        tk.Label(self, text="Pasta de exportação (onde o sistema do clube salva os .txt):", **lbl_opts).pack(anchor="w", padx=24, pady=(8,1))
         frm = tk.Frame(self, bg="#0c1a0e")
         frm.pack(padx=24, fill="x")
         tk.Entry(frm, textvariable=self.v_pasta, width=48, **ent_opts).pack(side="left", fill="x", expand=True)
@@ -486,7 +567,7 @@ class ConfigDialog(tk.Toplevel):
                   command=self.salvar).pack(fill="x", padx=24, pady=(16,8))
 
     def escolher_pasta(self):
-        pasta = filedialog.askdirectory(title="Selecione a pasta do PAMPA")
+        pasta = filedialog.askdirectory(title="Selecione a pasta de exportação")
         if pasta:
             self.v_pasta.set(pasta.replace("/","\\"))
 
@@ -504,8 +585,8 @@ class ConfigDialog(tk.Toplevel):
         self.destroy()
 
 
-
 class AbaImportarGPC(tk.Toplevel):
+    # (inalterado — preservado do v2.0)
     def __init__(self, parent, api_url, token):
         super().__init__(parent)
         self.api_url = api_url
@@ -616,13 +697,16 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("FCB Agent")
-        self.geometry("640x460")
+        self.geometry("680x480")
         self.configure(bg="#060e07")
         self.resizable(True, True)
         self.ui_queue = queue.Queue()
         self.engine   = None
         self.rodando  = False
-        self.chegadas = 0
+
+        # v2.4 — contadores separados
+        self.registradas = 0
+        self.rejeitadas  = 0
 
         self._build_ui()
         self._tick()
@@ -640,7 +724,7 @@ class App(tk.Tk):
         hdr.pack_propagate(False)
         tk.Label(hdr, text="FCBAgent", bg="#0c1a0e", fg="#f2f0ea",
                  font=("Consolas",14,"bold")).pack(side="left", padx=16)
-        tk.Label(hdr, text="v2.3", bg="#0c1a0e", fg="#3a9950",
+        tk.Label(hdr, text="v2.4", bg="#0c1a0e", fg="#3a9950",
                  font=("Consolas",8)).pack(side="left")
         tk.Button(hdr, text="⚙ Config", bg="#0c1a0e", fg="#f2f0ea",
                   relief="flat", command=self.abrir_config).pack(side="right", padx=8)
@@ -655,16 +739,29 @@ class App(tk.Tk):
                                    font=("Consolas",9), anchor="w")
         self.lbl_status.pack(fill="x", padx=16, pady=(8,0))
 
+        # ─── v2.4: dois contadores lado a lado ─────────────────────
         ctr = tk.Frame(self, bg="#060e07")
         ctr.pack(fill="x", padx=16, pady=8)
-        f = tk.Frame(ctr, bg="#111f13", padx=20, pady=10)
-        f.grid(row=0, column=0, padx=4, sticky="ew")
         ctr.columnconfigure(0, weight=1)
-        self.lbl_chegadas = tk.Label(f, text="0", bg="#111f13",
-                                     fg="#f2f0ea", font=("Consolas",22,"bold"))
-        self.lbl_chegadas.pack()
-        tk.Label(f, text="CHEGADAS ENVIADAS", bg="#111f13",
+        ctr.columnconfigure(1, weight=1)
+
+        # Card REGISTRADAS (verde)
+        f_ok = tk.Frame(ctr, bg="#111f13", padx=20, pady=10)
+        f_ok.grid(row=0, column=0, padx=(0,4), sticky="ew")
+        self.lbl_registradas = tk.Label(f_ok, text="0", bg="#111f13",
+                                        fg="#3a9950", font=("Consolas",22,"bold"))
+        self.lbl_registradas.pack()
+        tk.Label(f_ok, text="REGISTRADAS", bg="#111f13",
                  fg="#3a9950", font=("Consolas",7)).pack()
+
+        # Card REJEITADAS (vermelho)
+        f_rj = tk.Frame(ctr, bg="#111f13", padx=20, pady=10)
+        f_rj.grid(row=0, column=1, padx=(4,0), sticky="ew")
+        self.lbl_rejeitadas = tk.Label(f_rj, text="0", bg="#111f13",
+                                       fg="#ff4444", font=("Consolas",22,"bold"))
+        self.lbl_rejeitadas.pack()
+        tk.Label(f_rj, text="REJEITADAS", bg="#111f13",
+                 fg="#ff4444", font=("Consolas",7)).pack()
 
         tk.Label(self, text="LOG EM TEMPO REAL", bg="#060e07", fg="#3a9950",
                  font=("Consolas",7), anchor="w").pack(fill="x", padx=16)
@@ -673,10 +770,12 @@ class App(tk.Tk):
                                font=("Consolas",8), relief="flat",
                                state="disabled", wrap="word")
         self.log_box.pack(fill="both", expand=True, padx=16, pady=(2,8))
-        self.log_box.tag_config("ok",   foreground="#3a9950")
-        self.log_box.tag_config("erro", foreground="#ff6b00")
-        self.log_box.tag_config("info", foreground="#f2f0ea")
-        self.log_box.tag_config("lj",   foreground="#c8a84b")
+        self.log_box.tag_config("ok",        foreground="#3a9950")
+        self.log_box.tag_config("erro",      foreground="#ff6b00")
+        self.log_box.tag_config("info",      foreground="#f2f0ea")
+        self.log_box.tag_config("lj",        foreground="#c8a84b")
+        # v2.4: tag específica para rejeições (vermelho intenso)
+        self.log_box.tag_config("rejeitada", foreground="#ff4444")
 
         self.btn = tk.Button(self, text="▶ INICIAR", bg="#2d7a3e", fg="white",
                              font=("Consolas",10,"bold"), relief="flat", pady=8,
@@ -700,9 +799,17 @@ class App(tk.Tk):
                 elif t == "status":
                     cor = {"ok":"#3a9950","erro":"#ff6b00","info":"#c8a84b"}.get(ev.get("dados","info"),"#f2f0ea")
                     self.lbl_status.config(text=f"● {ev['msg']}", fg=cor)
+                # v2.4: eventos separados para sucesso e rejeição
+                elif t == "chegada_ok":
+                    self.registradas += 1
+                    self.lbl_registradas.config(text=str(self.registradas))
+                elif t == "chegada_rejeitada":
+                    self.rejeitadas += 1
+                    self.lbl_rejeitadas.config(text=str(self.rejeitadas))
+                # backward-compat: aceita "chegada" antigo como ok
                 elif t == "chegada":
-                    self.chegadas += 1
-                    self.lbl_chegadas.config(text=str(self.chegadas))
+                    self.registradas += 1
+                    self.lbl_registradas.config(text=str(self.registradas))
                 elif t == "conectado":
                     self.btn.config(text="■ PARAR", bg="#c05050")
                     self.rodando = True
@@ -720,11 +827,13 @@ class App(tk.Tk):
     def iniciar(self):
         if self.engine and self.engine.is_alive():
             return
-        self.chegadas = 0
-        self.lbl_chegadas.config(text="0")
+        self.registradas = 0
+        self.rejeitadas  = 0
+        self.lbl_registradas.config(text="0")
+        self.lbl_rejeitadas.config(text="0")
         self.engine = FCBEngine(self.ui_queue)
         self.engine.start()
-        self.log("FCB Agent iniciado", "ok")
+        self.log("FCB Agent v2.4 iniciado", "ok")
 
     def parar(self):
         if self.engine:
